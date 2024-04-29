@@ -4,11 +4,10 @@ import ipywidgets as widgets
 from IPython.display import display
 
 
-class SCU:
+class Charger:
     # Functions that change the displayed image
     def on_idle(self):
         self.plug.set_trait(name="value", value=self.idle)
-        self.label.set_trait(name="value", value="No car connected")
 
     def on_connected(self):
         self.plug.set_trait(name="value", value=self.carConnected)
@@ -16,50 +15,46 @@ class SCU:
     def on_charging(self):
         self.plug.set_trait(name="value", value=self.chargeCar)
 
-    # Functions that send signal to the state machine when the buttons are pressed
-    def on_buttonCharge_press(self, b):
-        self.stm.send("request_charging")
-
-    def on_buttonChargingFinished_press(self, b):
-        self.stm.send("charging_finished")
+    # Buttons that happens when the buttons are pressed
+    def on_buttonChargingAborted_press(self, b):
+        self.stm.send("charging_aborted")
 
     def on_init(self):
+        # load images and store them
         self.idle = open("../../Images/idle.jpg", "rb").read()
         self.carConnected = open("../../Images/connected.jpg", "rb").read()
         self.chargeCar = open("../../Images/charging.jpg", "rb").read()
 
         self.plug = widgets.Image(value=self.idle, format="jpg", width=500, height=500)
 
-        self.title = widgets.Label(value="Smart Charging Unit")
+        self.title = widgets.Label(value="Charging station")
 
-        self.label = widgets.Label(value="No car connected")
+        self.buttonChargingAborted = widgets.Button(description="Abort charging")
+        self.buttonChargingAborted.on_click(self.on_buttonChargingAborted_press)
 
-        self.buttonCharge = widgets.Button(description="Charge")
-        self.buttonCharge.on_click(self.on_buttonCharge_press)
-
-        self.buttonChargingFinished = widgets.Button(description="Finish charging")
-        self.buttonChargingFinished.on_click(self.on_buttonChargingFinished_press)
-
-        box = widgets.VBox(
-            [
-                self.title,
-                self.plug,
-                self.buttonCharge,
-                self.buttonChargingFinished,
-                self.label,
-            ]
-        )
-        display(box)
+        display(self.title, self.plug, self.buttonChargingAborted)
 
     # Functions that send mqtt messages
+    def send_mqtt_connected(self):
+        self.mqtt_client.publish("from_charger", "Car is connected to the charger")
+
+    def send_mqtt_disconnected(self):
+        self.mqtt_client.publish("from_charger", "Car is disconnected from the charger")
+
+    def send_mqtt_aborted(self):
+        self.mqtt_client.publish("from_charger", "Charging is aborted")
+
+    def request_carinfo(self):
+        self.mqtt_client.publish("from_charger", "Please provide car info")
+
+    def send_carinfo(self):
+        self.mqtt_client.publish("from_charger", "Car info")
+
     def send_mqtt_charging(self):
-        self.mqtt_client.publish("from_scu", "Please start charging")
+        self.mqtt_client.publish("from_charger", "Charging started")
 
     def send_mqtt_finished(self):
-        self.mqtt_client.publish("from_scu", "Please finish charging")
-
-    def request_data(self):
-        self.mqtt_client.publish("from_scu", "Requesting data")
+        self.mqtt_client.publish("from_charger", "Charging finished")
 
 
 # Triggers
@@ -69,7 +64,7 @@ t1_car_connected = {
     "trigger": "car_connected",
     "source": "idle",
     "target": "connected",
-    "effect": "request_data",
+    "effect": "send_mqtt_connected",
 }
 
 t2_request_charging = {
@@ -82,6 +77,7 @@ t3_car_disconnected = {
     "trigger": "car_disconnected",
     "source": "connected",
     "target": "idle",
+    "effect": "send_mqtt_disconnected",
 }
 t4_charging_finished = {
     "trigger": "charging_finished",
@@ -93,6 +89,21 @@ t5_charging_aborted = {
     "trigger": "charging_aborted",
     "source": "charging",
     "target": "connected",
+    "effect": "send_mqtt_aborted",
+}
+
+t6_request_data = {
+    "trigger": "request_data",
+    "source": "connected",
+    "target": "connected",
+    "effect": "request_carinfo",
+}
+
+t7_send_carinfo = {
+    "trigger": "carinfo_received",
+    "source": "connected",
+    "target": "connected",
+    "effect": "send_carinfo",
 }
 
 # States
@@ -109,7 +120,7 @@ import paho.mqtt.client as mqtt
 broker, port = "test.mosquitto.org", 1883
 
 
-class MQTT_SCU:
+class MQTT_CHARGER:
     def __init__(self):
         self.client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION1)
         self.client.on_connect = self.on_connect
@@ -118,23 +129,28 @@ class MQTT_SCU:
     def on_connect(self, client, userdata, flags, rc):
         print("on_connect(): {}".format(mqtt.connack_string(rc)))
 
-    # This function checks incoming messages and sends asignal to the state machine
+    # This function checks the message and sends a signal to the state machine
     def on_message(self, client, userdata, message):
-        if message.payload.decode() == "Car is connected to the charger":
-            self.stm_driver.send("car_connected", "scu")
+        if message.payload.decode() == "Please start charging":
+            self.stm_driver.send("request_charging", "charger")
+        elif message.payload.decode() == "Please finish charging":
+            self.stm_driver.send("charging_finished", "charger")
+        elif message.payload.decode() == "Car is connected to the charger":
+            self.stm_driver.send("car_connected", "charger")
         elif message.payload.decode() == "Car is disconnected from the charger":
-            self.stm_driver.send("car_disconnected", "scu")
-        elif message.payload.decode() == "Charging is aborted":
-            self.stm_driver.send("charging_aborted", "scu")
-        elif message.payload.decode() == "Car info":
-            self.scu.label.value = "Tesla Model S\nBattery: 50%\nRange: 200km\n"
-        # elif more stuff
+            self.stm_driver.send("car_disconnected", "charger")
+        elif message.payload.decode() == "Requesting data":
+            self.stm_driver.send("request_data", "charger")
+        elif message.payload.decode() == "Carinfo":
+            self.stm_driver.send("carinfo_received", "charger")
 
     def start(self, broker, port):
+        print("Connecting to broker:", broker, "port:", port)
         self.client.connect(broker, port)
 
-        # The SCU subscribes to the messages from the charger
-        self.client.subscribe("from_charger")
+        # The charger is connected to the car and SCU
+        self.client.subscribe("from_car")
+        self.client.subscribe("from_scu")
 
         try:
             # line below should not have the () after the function!
@@ -145,9 +161,9 @@ class MQTT_SCU:
             self.client.disconnect()
 
 
-scu = SCU()
+charger = Charger()
 machine = Machine(
-    name="scu",
+    name="charger",
     transitions=[
         t0_initial,
         t1_car_connected,
@@ -155,20 +171,21 @@ machine = Machine(
         t3_car_disconnected,
         t4_charging_finished,
         t5_charging_aborted,
+        t6_request_data,
+        t7_send_carinfo,
     ],
     states=[idle, connected, charging],
-    obj=scu,
+    obj=charger,
 )
 
-scu.stm = machine
+charger.stm = machine
 
 driver = Driver()
 driver.add_machine(machine)
 
-mqtt_scu = MQTT_SCU()
-scu.mqtt_client = mqtt_scu.client
-mqtt_scu.stm_driver = driver
-mqtt_scu.scu = scu
+mqtt_charger = MQTT_CHARGER()
+charger.mqtt_client = mqtt_charger.client
+mqtt_charger.stm_driver = driver
 
 driver.start()
-mqtt_scu.start(broker, port)
+mqtt_charger.start(broker, port)
